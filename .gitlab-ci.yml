@@ -1,0 +1,70 @@
+image: docker:dind
+
+stages:
+    - deploy
+
+
+variables:
+
+    DOCKER_DRIVER: overlay
+    DOCKER_HOST: tcp://docker:2375
+
+
+    # The commit image to push to Gitlab repository
+    IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+
+    # The latest image in Gitlab repository
+    LATEST_IMAGE: $CI_REGISTRY_IMAGE:latest
+
+    # The AWS region
+    STAGING_AWS_REGION: $STAGING_AWS_REGION
+
+    # The AWS ECR repository
+    STAGING_ECR_REPOSITORY: $STAGING_ECR_REPOSITORY
+
+    # The AWS deployement user access key
+    STAGING_AWS_ACCESS_KEY_ID: $STAGING_AWS_ACCESS_KEY_ID
+    STAGING_AWS_SECRET_ACCESS_KEY: $STAGING_AWS_SECRET_ACCESS_KEY
+
+services:
+    - docker:dind
+
+
+deploy:
+    stage: deploy
+    type: deploy
+
+    script:
+        
+        # Build commit image
+        - docker build -t flask-app .
+
+        # Install python requirements
+        - apk update
+        - apk upgrade
+        - apk add python python-dev py-pip
+
+        # AWS configs
+        - export AWS_REGION=$STAGING_AWS_REGION
+        - export AWS_ACCESS_KEY_ID=$STAGING_AWS_ACCESS_KEY_ID
+        - export AWS_SECRET_ACCESS_KEY=$STAGING_AWS_SECRET_ACCESS_KEY
+
+        - SERVICE_NAME="flask-app"
+        - TASK_FAMILY="flask-app"
+
+        # The ECR image tag
+        - export ECR_IMAGE_TAG=$STAGING_ECR_REPOSITORY:$CI_COMMIT_SHA
+       
+        # Push the commit image to ECR repository
+        - pip install awscli simplejson
+        - "`aws ecr get-login --no-include-email --region $AWS_REGION`"
+        
+        - docker tag flask-app $ECR_IMAGE_TAG
+        - docker push $ECR_IMAGE_TAG
+        - python get_json.py $CI_COMMIT_SHA
+        - sed -e "s;%CI_COMMIT_SHA%;$CI_COMMIT_SHA;g" flask-app-task.json > flask-app-task-v_$CI_COMMIT_SHA.json
+        - aws ecs register-task-definition --family flask-app --cli-input-json file://flask-app-task-v_$CI_COMMIT_SHA.json --region $AWS_REGION 
+        - TASK_REVISION=`aws ecs describe-task-definition --task-definition flask-app --region $AWS_REGION | egrep "revision" | tr "/" " " | awk '{print $2}' | sed 's/"$//'`
+        - aws ecs update-service --cluster flask-app --service $SERVICE_NAME --task-definition $TASK_FAMILY:$TASK_REVISION --desired-count 1 --region $AWS_REGION
+
+
